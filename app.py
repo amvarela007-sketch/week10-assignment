@@ -63,19 +63,7 @@ else:
         with open("memory.json", 'w') as f:
             json.dump(memory, f, indent=4)
 
-    # Function to extract memory from user message
-    def extract_memory(user_message, token):
-        prompt = f"Given this user message, extract any personal facts or preferences as a JSON object with keys like 'name', 'interests', 'preferences', etc. If none, return {{}}. Message: {user_message}"
-        success, result = query_hf("gpt2", prompt, token, stream=False)
-        if success:
-            try:
-                extracted = json.loads(result)
-                return extracted
-            except:
-                return {}
-        return {}
-
-    # Function to query Hugging Face API
+    # Function to query Hugging Face API (DEFINE BEFORE extract_memory)
     def query_hf(model_name: str, prompt_text: str, token: str, stream: bool = False, timeout: int = 30):
         # Use the Inference API with a full model path
         url = f"https://api-inference.huggingface.co/models/{model_name}"
@@ -123,6 +111,21 @@ else:
                 return True, first
 
         return True, str(data)
+
+    # Function to extract memory from user message (DEFINED AFTER query_hf)
+    def extract_memory(user_message, token):
+        try:
+            prompt = f"Extract personal facts from: '{user_message}'. Return JSON with keys: name, interests, preferences. If none found, return {{}}"
+            success, result = query_hf("gpt2", prompt, token, stream=False)
+            if success:
+                try:
+                    extracted = json.loads(result)
+                    return extracted
+                except:
+                    return {}
+            return {}
+        except:
+            return {}
 
     # Load memory
     memory = load_memory()
@@ -225,10 +228,21 @@ else:
                 # Add user message to display
                 current_chat["messages"].append({"role": "user", "content": prompt})
                 save_chat(current_chat)
-                
+                st.rerun()  # Show user message immediately
+        else:
+            st.error("Selected chat not found.")
+    else:
+        st.info("No active chat. Create a new chat to start.")
+    
+    # Process AI response if last message is from user and we haven't responded yet
+    if st.session_state.current_chat_id:
+        current_chat = next((c for c in st.session_state.chats if c["id"] == st.session_state.current_chat_id), None)
+        if current_chat and current_chat["messages"]:
+            last_msg = current_chat["messages"][-1]
+            if last_msg["role"] == "user":
                 # Generate title if first message
                 if len(current_chat["messages"]) == 1:
-                    current_chat["title"] = prompt[:50] + ("..." if len(prompt) > 50 else "")
+                    current_chat["title"] = last_msg["content"][:50] + ("..." if len(last_msg["content"]) > 50 else "")
                 
                 # Build conversation context with memory
                 context = "You are a helpful AI assistant."
@@ -236,25 +250,21 @@ else:
                     context += f" User info: {json.dumps(memory)}"
                 
                 conversation_text = context + "\n\n"
-                for msg in current_chat["messages"][:-1]:
+                for msg in current_chat["messages"]:
                     conversation_text += f"{msg['role'].capitalize()}: {msg['content']}\n"
-                conversation_text += f"User: {prompt}\nAssistant:"
+                conversation_text += "Assistant:"
                 
                 # Get AI response
-                with st.spinner("Getting response from AI..."):
+                with st.spinner("Thinking..."):
                     success, result = query_hf("gpt2", conversation_text, TOKEN, stream=False)
                 
                 if success:
-                    # Save to history
+                    # Save assistant response
                     current_chat["messages"].append({"role": "assistant", "content": result})
                     save_chat(current_chat)
                     
-                    # Display response
-                    st.write("**Assistant:**")
-                    st.write(result)
-                    
-                    # Extract memory from user message
-                    extracted = extract_memory(prompt, TOKEN)
+                    # Try to extract memory
+                    extracted = extract_memory(last_msg["content"], TOKEN)
                     if extracted:
                         memory.update(extracted)
                         save_memory(memory)
@@ -262,8 +272,3 @@ else:
                     st.rerun()
                 else:
                     st.error(f"Error: {result}")
-                    st.rerun()
-        else:
-            st.error("Selected chat not found.")
-    else:
-        st.info("No active chat. Create a new chat to start.")
