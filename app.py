@@ -96,27 +96,23 @@ else:
 
         if stream:
             # Handle streaming response
-            def stream_generator():
-                full_response = ""
-                for line in resp.iter_lines():
-                    if line:
-                        line = line.decode('utf-8')
-                        if line.startswith('data: '):
-                            data = line[6:]
-                            if data == '[DONE]':
-                                break
-                            try:
-                                chunk = json.loads(data)
-                                if 'token' in chunk:
-                                    token_text = chunk['token']['text']
-                                    full_response += token_text
-                                    yield token_text
-                                    import time
-                                    time.sleep(0.05)  # Small delay to make streaming visible
-                            except json.JSONDecodeError:
-                                continue
-                return full_response
-            return True, stream_generator()
+            full_response = ""
+            for line in resp.iter_lines():
+                if line:
+                    line = line.decode('utf-8')
+                    if line.startswith('data: '):
+                        data = line[6:]
+                        if data == '[DONE]':
+                            break
+                        try:
+                            chunk = json.loads(data)
+                            if 'token' in chunk:
+                                token_text = chunk['token']['text']
+                                full_response += token_text
+                                yield (True, token_text)
+                        except json.JSONDecodeError:
+                            continue
+            yield (False, full_response)  # Final signal with complete response
         else:
             # Non-streaming response
             try:
@@ -234,8 +230,10 @@ else:
                     st.write(msg["content"])
             # Input for new message
             if prompt := st.chat_input("Type your message..."):
-                # Add user message
+                # Add user message to display
                 current_chat["messages"].append({"role": "user", "content": prompt})
+                save_chat(current_chat)
+                
                 # Generate title if first message
                 if len(current_chat["messages"]) == 1:
                     current_chat["title"] = prompt[:50] + ("..." if len(prompt) > 50 else "")
@@ -250,30 +248,37 @@ else:
                 conversation_text += f"User: {prompt}\nAssistant:"
                 
                 # Get AI response with streaming
-                with st.spinner("Waiting for response..."):
-                    success, result = query_hf("gpt2", conversation_text, TOKEN, stream=True)
+                st.write("**Assistant:**")
+                response_placeholder = st.empty()
+                
+                success, result = query_hf("gpt2", conversation_text, TOKEN, stream=True)
                 
                 if success:
-                    # Stream the response
-                    response_placeholder = st.empty()
                     full_response = ""
-                    for chunk in result:
-                        full_response += chunk
-                        response_placeholder.write(full_response)
+                    for is_chunk, data in result:
+                        if is_chunk:
+                            # It's a chunk - display it incrementally
+                            full_response += data
+                            with response_placeholder.container():
+                                st.write(full_response)
+                            import time
+                            time.sleep(0.02)
+                        else:
+                            # It's the final complete response
+                            full_response = data
                     
                     # Save to history
                     current_chat["messages"].append({"role": "assistant", "content": full_response})
+                    save_chat(current_chat)
                     
-                    # Extract memory from user message
+                    # Extract memory from user message (non-blocking)
                     extracted = extract_memory(prompt, TOKEN)
                     if extracted:
                         memory.update(extracted)
                         save_memory(memory)
                 else:
                     st.error(f"Error: {result}")
-                
-                save_chat(current_chat)
-                st.rerun()
+                    st.rerun()
         else:
             st.error("Selected chat not found.")
     else:
