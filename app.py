@@ -95,24 +95,30 @@ else:
             return False, f"Hugging Face API error ({resp.status_code}): {detail}"
 
         if stream:
-            # Handle streaming response
-            full_response = ""
-            for line in resp.iter_lines():
-                if line:
-                    line = line.decode('utf-8')
-                    if line.startswith('data: '):
-                        data = line[6:]
-                        if data == '[DONE]':
-                            break
-                        try:
-                            chunk = json.loads(data)
-                            if 'token' in chunk:
-                                token_text = chunk['token']['text']
-                                full_response += token_text
-                                yield (True, token_text)
-                        except json.JSONDecodeError:
-                            continue
-            yield (False, full_response)  # Final signal with complete response
+            # Handle streaming response with a generator
+            def stream_generator():
+                full_response = ""
+                try:
+                    for line in resp.iter_lines():
+                        if line:
+                            line = line.decode('utf-8')
+                            if line.startswith('data: '):
+                                data = line[6:]
+                                if data == '[DONE]':
+                                    break
+                                try:
+                                    chunk = json.loads(data)
+                                    if 'token' in chunk:
+                                        token_text = chunk['token']['text']
+                                        full_response += token_text
+                                        yield token_text
+                                except json.JSONDecodeError:
+                                    continue
+                except Exception as e:
+                    yield f"Error: {str(e)}"
+                    return
+            
+            return True, stream_generator()
         else:
             # Non-streaming response
             try:
@@ -255,30 +261,30 @@ else:
                 
                 if success:
                     full_response = ""
-                    for is_chunk, data in result:
-                        if is_chunk:
-                            # It's a chunk - display it incrementally
-                            full_response += data
-                            with response_placeholder.container():
-                                st.write(full_response)
+                    try:
+                        for chunk in result:
+                            full_response += chunk
+                            response_placeholder.write(full_response)
                             import time
                             time.sleep(0.02)
-                        else:
-                            # It's the final complete response
-                            full_response = data
+                    except Exception as e:
+                        st.error(f"Streaming error: {str(e)}")
+                        full_response = ""
                     
                     # Save to history
-                    current_chat["messages"].append({"role": "assistant", "content": full_response})
-                    save_chat(current_chat)
-                    
-                    # Extract memory from user message (non-blocking)
-                    extracted = extract_memory(prompt, TOKEN)
-                    if extracted:
-                        memory.update(extracted)
-                        save_memory(memory)
+                    if full_response:
+                        current_chat["messages"].append({"role": "assistant", "content": full_response})
+                        save_chat(current_chat)
+                        
+                        # Extract memory from user message (non-blocking)
+                        extracted = extract_memory(prompt, TOKEN)
+                        if extracted:
+                            memory.update(extracted)
+                            save_memory(memory)
+                    else:
+                        st.error("No response received from the model.")
                 else:
                     st.error(f"Error: {result}")
-                    st.rerun()
         else:
             st.error("Selected chat not found.")
     else:
