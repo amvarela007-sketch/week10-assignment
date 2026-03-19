@@ -1,10 +1,17 @@
 import requests
 import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
+import datetime
+import uuid
+import json
+import os
 
 st.set_page_config(page_title="My AI Chat", layout="wide")
 
 st.title("My AI Chat")
+
+# Ensure chats directory exists
+os.makedirs("chats", exist_ok=True)
 
 try:
     TOKEN = st.secrets.get("HF_TOKEN", "")
@@ -19,16 +26,63 @@ if not TOKEN:
         "Hugging Face token not found. Please add `HF_TOKEN` to `.streamlit/secrets.toml` and restart the app."
     )
 else:
-    model = "gpt2"
-    prompt = "Hello!"
+    # Function to save chat to JSON file
+    def save_chat(chat):
+        filename = f"chats/{chat['id']}.json"
+        chat_copy = chat.copy()
+        chat_copy['timestamp'] = chat['timestamp'].isoformat()
+        with open(filename, 'w') as f:
+            json.dump(chat_copy, f, indent=4)
 
-    def query_hf(model_name: str, prompt_text: str, token: str, timeout: int = 15):
-        url = f"https://api-inference.huggingface.co/models/{model_name}"
+    # Function to load chat from JSON file
+    def load_chat(chat_id):
+        filename = f"chats/{chat_id}.json"
+        with open(filename, 'r') as f:
+            chat = json.load(f)
+        chat['timestamp'] = datetime.datetime.fromisoformat(chat['timestamp'])
+        return chat
+
+    # Function to delete chat file
+    def delete_chat_file(chat_id):
+        filename = f"chats/{chat_id}.json"
+        if os.path.exists(filename):
+            os.remove(filename)
+
+    # Function to load memory
+    def load_memory():
+        if os.path.exists("memory.json"):
+            try:
+                with open("memory.json", 'r') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+    # Function to save memory
+    def save_memory(memory):
+        with open("memory.json", 'w') as f:
+            json.dump(memory, f, indent=4)
+
+    # Function to extract memory from user message
+    def extract_memory(user_message, token):
+        prompt = f"Given this user message, extract any personal facts or preferences as a JSON object with keys like 'name', 'interests', 'preferences', etc. If none, return {{}}. Message: {user_message}"
+        success, result = query_hf("gpt2", prompt, token, stream=False)
+        if success:
+            try:
+                extracted = json.loads(result)
+                return extracted
+            except:
+                return {}
+        return {}
+
+    # Function to query Hugging Face API with streaming support
+    def query_hf(model_name: str, prompt_text: str, token: str, stream: bool = False, timeout: int = 15):
+        url = f"https://router.huggingface.co/models/{model_name}"
         headers = {"Authorization": f"Bearer {token}"}
-        payload = {"inputs": prompt_text}
+        payload = {"inputs": prompt_text, "stream": stream}
 
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            resp = requests.post(url, headers=headers, json=payload, stream=stream, timeout=timeout)
         except requests.exceptions.RequestException as exc:
             return False, f"Network error while contacting Hugging Face API: {exc}"
 
@@ -40,28 +94,187 @@ else:
             detail = resp.text.strip() or resp.reason
             return False, f"Hugging Face API error ({resp.status_code}): {detail}"
 
-        try:
-            data = resp.json()
-        except ValueError:
-            return False, "Received an unexpected response from Hugging Face (not valid JSON)."
+        if stream:
+            # Handle streaming response
+            def stream_generator():
+                full_response = ""
+                for line in resp.iter_lines():
+                    if line:
+                        line = line.decode('utf-8')
+                        if line.startswith('data: '):
+                            data = line[6:]
+                            if data == '[DONE]':
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                if 'token' in chunk:
+                                    token_text = chunk['token']['text']
+                                    full_response += token_text
+                                    yield token_text
+                                    import time
+                                    time.sleep(0.05)  # Small delay to make streaming visible
+                            except json.JSONDecodeError:
+                                continue
+                return full_response
+            return True, stream_generator()
+        else:
+            # Non-streaming response
+            try:
+                data = resp.json()
+            except ValueError:
+                return False, "Received an unexpected response from Hugging Face (not valid JSON)."
 
-        if isinstance(data, dict) and "error" in data:
-            return False, f"Hugging Face API error: {data['error']}"
+            if isinstance(data, dict) and "error" in data:
+                return False, f"Hugging Face API error: {data['error']}"
 
-        if isinstance(data, list) and data:
-            first = data[0]
-            if isinstance(first, dict) and "generated_text" in first:
-                return True, first["generated_text"]
-            if isinstance(first, str):
-                return True, first
+            if isinstance(data, list) and data:
+                first = data[0]
+                if isinstance(first, dict) and "generated_text" in first:
+                    return True, first["generated_text"]
+                if isinstance(first, str):
+                    return True, first
 
-        return True, str(data)
+            return True, str(data)
 
-    with st.spinner("Sending test message to Hugging Face..."):
-        success, result = query_hf(model, prompt, TOKEN)
+    # Load memory
+    memory = load_memory()
 
-    if success:
-        st.subheader("Hugging Face response")
-        st.write(result)
+    # Initialize session state for chats
+    if "chats" not in st.session_state:
+        st.session_state.chats = []
+        # Load existing chats from files
+        if os.path.exists("chats"):
+            for file in os.listdir("chats"):
+                if file.endswith(".json"):
+                    chat_id = file[:-5]
+                    try:
+                        chat = load_chat(chat_id)
+                        st.session_state.chats.append(chat)
+                    except Exception as e:
+                        st.warning(f"Failed to load chat {chat_id}: {e}")
+
+    if "current_chat_id" not in st.session_state:
+        st.session_state.current_chat_id = None
+
+    # Function to create a new chat
+    def create_new_chat():
+        chat_id = str(uuid.uuid4())
+        new_chat = {
+            "id": chat_id,
+            "title": "New Chat",
+            "timestamp": datetime.datetime.now(),
+            "messages": []
+        }
+        st.session_state.chats.append(new_chat)
+        st.session_state.current_chat_id = chat_id
+        save_chat(new_chat)
+        return chat_id
+
+    # Function to delete a chat
+    def delete_chat(chat_id):
+        st.session_state.chats = [c for c in st.session_state.chats if c["id"] != chat_id]
+        delete_chat_file(chat_id)
+        if st.session_state.current_chat_id == chat_id:
+            if st.session_state.chats:
+                st.session_state.current_chat_id = st.session_state.chats[0]["id"]
+            else:
+                st.session_state.current_chat_id = None
+
+    # Sidebar
+    with st.sidebar:
+        st.header("Chats")
+        if st.button("New Chat", key="new_chat"):
+            create_new_chat()
+            st.rerun()
+
+        st.markdown("---")
+
+        # User Memory Section
+        with st.expander("📝 User Memory"):
+            st.write("**Stored traits:**")
+            if memory:
+                st.json(memory)
+            else:
+                st.info("No memory stored yet. Share preferences to build your profile!")
+            
+            if st.button("Clear Memory", key="clear_memory"):
+                memory.clear()
+                save_memory(memory)
+                st.rerun()
+
+        st.markdown("---")
+
+        # Scrollable list of chats
+        for chat in st.session_state.chats:
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                is_active = chat["id"] == st.session_state.current_chat_id
+                button_label = f"{'▶ ' if is_active else ''}{chat['title']} - {chat['timestamp'].strftime('%H:%M')}"
+                if st.button(
+                    button_label,
+                    key=f"chat_{chat['id']}",
+                    help=f"Created: {chat['timestamp'].strftime('%Y-%m-%d %H:%M')}",
+                    use_container_width=True
+                ):
+                    st.session_state.current_chat_id = chat["id"]
+                    st.rerun()
+            with col2:
+                if st.button("✕", key=f"delete_{chat['id']}", help="Delete chat"):
+                    delete_chat(chat["id"])
+                    st.rerun()
+
+    # Main area
+    if st.session_state.current_chat_id:
+        current_chat = next((c for c in st.session_state.chats if c["id"] == st.session_state.current_chat_id), None)
+        if current_chat:
+            st.subheader(f"Current Chat: {current_chat['title']}")
+            # Display messages
+            for msg in current_chat["messages"]:
+                with st.chat_message(msg["role"]):
+                    st.write(msg["content"])
+            # Input for new message
+            if prompt := st.chat_input("Type your message..."):
+                # Add user message
+                current_chat["messages"].append({"role": "user", "content": prompt})
+                # Generate title if first message
+                if len(current_chat["messages"]) == 1:
+                    current_chat["title"] = prompt[:50] + ("..." if len(prompt) > 50 else "")
+                
+                # Build conversation context with memory
+                context = "You are a helpful AI assistant."
+                if memory:
+                    context += f" User preferences: {json.dumps(memory)}"
+                conversation_text = context + "\n\n"
+                for msg in current_chat["messages"][:-1]:  # Exclude the one we just added
+                    conversation_text += f"{msg['role'].capitalize()}: {msg['content']}\n"
+                conversation_text += f"User: {prompt}\nAssistant:"
+                
+                # Get AI response with streaming
+                with st.spinner("Waiting for response..."):
+                    success, result = query_hf("gpt2", conversation_text, TOKEN, stream=True)
+                
+                if success:
+                    # Stream the response
+                    response_placeholder = st.empty()
+                    full_response = ""
+                    for chunk in result:
+                        full_response += chunk
+                        response_placeholder.write(full_response)
+                    
+                    # Save to history
+                    current_chat["messages"].append({"role": "assistant", "content": full_response})
+                    
+                    # Extract memory from user message
+                    extracted = extract_memory(prompt, TOKEN)
+                    if extracted:
+                        memory.update(extracted)
+                        save_memory(memory)
+                else:
+                    st.error(f"Error: {result}")
+                
+                save_chat(current_chat)
+                st.rerun()
+        else:
+            st.error("Selected chat not found.")
     else:
-        st.error(result)
+        st.info("No active chat. Create a new chat to start.")
