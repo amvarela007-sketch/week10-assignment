@@ -65,8 +65,8 @@ else:
 
     # Function to query Hugging Face API (DEFINE BEFORE extract_memory)
     def query_hf(model_name: str, prompt_text: str, token: str, stream: bool = False, timeout: int = 30):
-        # Use the Router API endpoint (api-inference.huggingface.co is deprecated)
-        url = f"https://router.huggingface.co/models/{model_name}"
+        # Use the Tasks API endpoint for text-generation (automatically selects available model)
+        url = "https://api-inference.huggingface.co/models/gpt2"
         headers = {"Authorization": f"Bearer {token}"}
         payload = {"inputs": prompt_text}
 
@@ -80,7 +80,9 @@ else:
         if resp.status_code == 429:
             return False, "Rate limit exceeded. Please wait and try again."
         if resp.status_code == 404:
-            return False, f"Model '{model_name}' not found. Try 'gpt2', 'distilgpt2', or another model."
+            return False, f"Model not found on Hugging Face API."
+        if resp.status_code == 410:
+            return False, "Hugging Face endpoint temporarily unavailable. Please try again."
         if resp.status_code >= 400:
             detail = resp.text.strip() or resp.reason
             return False, f"API error ({resp.status_code}): {detail}"
@@ -116,7 +118,7 @@ else:
     def extract_memory(user_message, token):
         try:
             prompt = f"Extract personal facts from: '{user_message}'. Return JSON with keys: name, interests, preferences. If none found, return {{}}"
-            success, result = query_hf("distilgpt2", prompt, token, stream=False)
+            success, result = query_hf("gpt2", prompt, token, stream=False)
             if success:
                 try:
                     extracted = json.loads(result)
@@ -256,7 +258,7 @@ else:
                 
                 # Get AI response
                 with st.spinner("Thinking..."):
-                    success, result = query_hf("distilgpt2", conversation_text, TOKEN, stream=False)
+                    success, result = query_hf("gpt2", conversation_text, TOKEN, stream=False)
                 
                 if success:
                     # Save assistant response
