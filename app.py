@@ -75,68 +75,54 @@ else:
                 return {}
         return {}
 
-    # Function to query Hugging Face API with streaming support
-    def query_hf(model_name: str, prompt_text: str, token: str, stream: bool = False, timeout: int = 15):
-        url = f"https://router.huggingface.co/models/{model_name}"
+    # Function to query Hugging Face API
+    def query_hf(model_name: str, prompt_text: str, token: str, stream: bool = False, timeout: int = 30):
+        # Use the Inference API with a full model path
+        url = f"https://api-inference.huggingface.co/models/{model_name}"
         headers = {"Authorization": f"Bearer {token}"}
-        payload = {"inputs": prompt_text, "stream": stream}
+        payload = {"inputs": prompt_text}
 
         try:
-            resp = requests.post(url, headers=headers, json=payload, stream=stream, timeout=timeout)
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
         except requests.exceptions.RequestException as exc:
-            return False, f"Network error while contacting Hugging Face API: {exc}"
+            return False, f"Network error: {exc}"
 
         if resp.status_code == 401:
-            return False, "Authentication failed. Check that your Hugging Face token is valid."
+            return False, "Authentication failed. Check your Hugging Face token."
         if resp.status_code == 429:
             return False, "Rate limit exceeded. Please wait and try again."
+        if resp.status_code == 404:
+            return False, f"Model '{model_name}' not found. Try 'gpt2', 'distilgpt2', or another model."
         if resp.status_code >= 400:
             detail = resp.text.strip() or resp.reason
-            return False, f"Hugging Face API error ({resp.status_code}): {detail}"
+            return False, f"API error ({resp.status_code}): {detail}"
 
-        if stream:
-            # Handle streaming response with a generator
-            def stream_generator():
-                full_response = ""
-                try:
-                    for line in resp.iter_lines():
-                        if line:
-                            line = line.decode('utf-8')
-                            if line.startswith('data: '):
-                                data = line[6:]
-                                if data == '[DONE]':
-                                    break
-                                try:
-                                    chunk = json.loads(data)
-                                    if 'token' in chunk:
-                                        token_text = chunk['token']['text']
-                                        full_response += token_text
-                                        yield token_text
-                                except json.JSONDecodeError:
-                                    continue
-                except Exception as e:
-                    yield f"Error: {str(e)}"
-                    return
-            
-            return True, stream_generator()
-        else:
-            # Non-streaming response
-            try:
-                data = resp.json()
-            except ValueError:
-                return False, "Received an unexpected response from Hugging Face (not valid JSON)."
+        try:
+            data = resp.json()
+        except ValueError:
+            return False, "Invalid response from API."
 
-            if isinstance(data, dict) and "error" in data:
-                return False, f"Hugging Face API error: {data['error']}"
+        # Handle different response formats
+        if isinstance(data, dict):
+            if "error" in data:
+                return False, f"API error: {data['error']}"
+            if "generated_text" in data:
+                return True, data["generated_text"]
+            # Check for model load message
+            if "estimated_time" in data:
+                return False, f"Model is loading. Estimated time: {data['estimated_time']}s. Please try again."
 
-            if isinstance(data, list) and data:
-                first = data[0]
-                if isinstance(first, dict) and "generated_text" in first:
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                if "generated_text" in first:
                     return True, first["generated_text"]
-                if isinstance(first, str):
-                    return True, first
+                if "error" in first:
+                    return False, f"Error: {first['error']}"
+            if isinstance(first, str):
+                return True, first
 
-            return True, str(data)
+        return True, str(data)
 
     # Load memory
     memory = load_memory()
@@ -247,44 +233,36 @@ else:
                 # Build conversation context with memory
                 context = "You are a helpful AI assistant."
                 if memory:
-                    context += f" User preferences: {json.dumps(memory)}"
+                    context += f" User info: {json.dumps(memory)}"
+                
                 conversation_text = context + "\n\n"
-                for msg in current_chat["messages"][:-1]:  # Exclude the one we just added
+                for msg in current_chat["messages"][:-1]:
                     conversation_text += f"{msg['role'].capitalize()}: {msg['content']}\n"
                 conversation_text += f"User: {prompt}\nAssistant:"
                 
-                # Get AI response with streaming
-                st.write("**Assistant:**")
-                response_placeholder = st.empty()
-                
-                success, result = query_hf("gpt2", conversation_text, TOKEN, stream=True)
+                # Get AI response
+                with st.spinner("Getting response from AI..."):
+                    success, result = query_hf("gpt2", conversation_text, TOKEN, stream=False)
                 
                 if success:
-                    full_response = ""
-                    try:
-                        for chunk in result:
-                            full_response += chunk
-                            response_placeholder.write(full_response)
-                            import time
-                            time.sleep(0.02)
-                    except Exception as e:
-                        st.error(f"Streaming error: {str(e)}")
-                        full_response = ""
-                    
                     # Save to history
-                    if full_response:
-                        current_chat["messages"].append({"role": "assistant", "content": full_response})
-                        save_chat(current_chat)
-                        
-                        # Extract memory from user message (non-blocking)
-                        extracted = extract_memory(prompt, TOKEN)
-                        if extracted:
-                            memory.update(extracted)
-                            save_memory(memory)
-                    else:
-                        st.error("No response received from the model.")
+                    current_chat["messages"].append({"role": "assistant", "content": result})
+                    save_chat(current_chat)
+                    
+                    # Display response
+                    st.write("**Assistant:**")
+                    st.write(result)
+                    
+                    # Extract memory from user message
+                    extracted = extract_memory(prompt, TOKEN)
+                    if extracted:
+                        memory.update(extracted)
+                        save_memory(memory)
+                    
+                    st.rerun()
                 else:
                     st.error(f"Error: {result}")
+                    st.rerun()
         else:
             st.error("Selected chat not found.")
     else:
