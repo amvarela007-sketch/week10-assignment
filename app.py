@@ -116,7 +116,7 @@ else:
     def extract_memory(user_message, token):
         try:
             prompt = f"Extract personal facts from: '{user_message}'. Return JSON with keys: name, interests, preferences. If none found, return {{}}"
-            success, result = query_hf("gpt2", prompt, token, stream=False)
+            success, result = query_hf("distilgpt2", prompt, token, stream=False)
             if success:
                 try:
                     extracted = json.loads(result)
@@ -256,7 +256,7 @@ else:
                 
                 # Get AI response
                 with st.spinner("Thinking..."):
-                    success, result = query_hf("gpt2", conversation_text, TOKEN, stream=False)
+                    success, result = query_hf("distilgpt2", conversation_text, TOKEN, stream=False)
                 
                 if success:
                     # Save assistant response
