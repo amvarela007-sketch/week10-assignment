@@ -65,8 +65,8 @@ else:
 
     # Function to query Hugging Face API (DEFINE BEFORE extract_memory)
     def query_hf(model_name: str, prompt_text: str, token: str, stream: bool = False, timeout: int = 30):
-        # Use the Inference API with a full model path
-        url = f"https://api-inference.huggingface.co/models/{model_name}"
+        # Use the Router API endpoint (api-inference.huggingface.co is deprecated)
+        url = f"https://router.huggingface.co/models/{model_name}"
         headers = {"Authorization": f"Bearer {token}"}
         payload = {"inputs": prompt_text}
 
